@@ -1,5 +1,5 @@
 // ========================================
-//   MODEMODE1.AI — FINAL SERVER (sqlite3)
+// MODEMODE1.AI — FINAL SERVER (sql.js + local wasm)
 // ========================================
 
 import express from "express";
@@ -12,8 +12,7 @@ import fs from "fs";
 import multer from "multer";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+import initSqlJs from "sql.js";
 
 // ----------------------------
 // 경로
@@ -22,17 +21,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ----------------------------
-// 환경변수
+// ENV
 // ----------------------------
 try { (await import("dotenv")).config(); } catch {}
-
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const CORS_ALLOW = process.env.CORS_ORIGIN || "*";
 
 // ----------------------------
-// EXPRESS APP
+// Express
 // ----------------------------
 const app = express();
 
@@ -52,29 +50,48 @@ app.set("trust proxy", 1);
 app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
 
 // ----------------------------
-// SQLite3 DB 연결
+// SQL.js + local wasm
 // ----------------------------
-sqlite3.verbose();
+console.log("⏳ Loading SQL.js with local wasm...");
 
-const dbPath = path.join(__dirname, "data", "app.db");
-if (!fs.existsSync(path.join(__dirname, "data"))) {
-  fs.mkdirSync(path.join(__dirname, "data"));
-}
-
-const db = await open({
-  filename: dbPath,
-  driver: sqlite3.Database
+const SQL = await initSqlJs({
+  locateFile: (file) => path.join(__dirname, "sqljs", file)
 });
 
-await db.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  email TEXT UNIQUE NOT NULL,
-  name TEXT NOT NULL,
-  pw_hash TEXT NOT NULL,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-`);
+console.log("✅ SQL.js Loaded!");
+
+// ----------------------------
+// DB 준비
+// ----------------------------
+const DB_DIR = path.join(__dirname, "data");
+const DB_PATH = path.join(DB_DIR, "app.db");
+
+if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR);
+
+let db;
+
+// 기존 DB 로드
+if (fs.existsSync(DB_PATH)) {
+  const fileBuf = fs.readFileSync(DB_PATH);
+  db = new SQL.Database(fileBuf);
+} else {
+  db = new SQL.Database();
+  db.run(`
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      pw_hash TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+  `);
+  saveDB();
+}
+
+function saveDB() {
+  const data = Buffer.from(db.export());
+  fs.writeFileSync(DB_PATH, data);
+}
 
 // ----------------------------
 // 파일 업로드
@@ -90,6 +107,7 @@ const upload = multer({
   }),
   limits: { fileSize: 10 * 1024 * 1024 }
 });
+
 app.use("/uploads", express.static(UP_DIR));
 
 // ----------------------------
@@ -104,33 +122,37 @@ function makeToken(user) {
 }
 
 // ----------------------------
-// AUTH API
+// AUTH Signup
 // ----------------------------
 app.post("/api/auth/signup", async (req, res) => {
   try {
-    const { name, email, password } = req.body || {};
+    const { name, email, password } = req.body;
+
     if (!name || !email || !password)
       return res.json({ ok: false, msg: "필수값 없음" });
 
-    const exists = await db.get("SELECT id FROM users WHERE email=?", email);
-    if (exists) return res.json({ ok: false, msg: "이미 가입된 이메일" });
+    const check = db.exec(
+      "SELECT id FROM users WHERE email=$email",
+      { $email: email }
+    );
+    if (check.length > 0)
+      return res.json({ ok: false, msg: "이미 가입된 이메일" });
 
     const pw_hash = await bcrypt.hash(password, 10);
 
-    const result = await db.run(
-      "INSERT INTO users (email, name, pw_hash) VALUES (?, ?, ?)",
-      email,
-      name,
-      pw_hash
+    db.run(
+      "INSERT INTO users (email, name, pw_hash) VALUES ($e,$n,$p)",
+      { $e: email, $n: name, $p: pw_hash }
     );
 
-    const token = makeToken({
-      id: result.lastID,
-      email,
-      name
-    });
+    saveDB();
 
-    res.json({ ok: true, email, name, token });
+    return res.json({
+      ok: true,
+      email,
+      name,
+      token: makeToken({ id: Date.now(), email, name })
+    });
 
   } catch (err) {
     console.error(err);
@@ -138,20 +160,39 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 });
 
+// ----------------------------
+// AUTH Login
+// ----------------------------
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    if (!email || !password)
-      return res.json({ ok: false, msg: "필수값 없음" });
+    const { email, password } = req.body;
 
-    const user = await db.get("SELECT * FROM users WHERE email=?", email);
-    if (!user) return res.json({ ok: false, msg: "이메일/비번 불일치" });
+    const result = db.exec(
+      "SELECT * FROM users WHERE email=$email LIMIT 1",
+      { $email: email }
+    );
+
+    if (result.length === 0)
+      return res.json({ ok: false, msg: "이메일/비번 불일치" });
+
+    const row = result[0].values[0];
+
+    const user = {
+      id: row[0],
+      email: row[1],
+      name: row[2],
+      pw_hash: row[3]
+    };
 
     const ok = await bcrypt.compare(password, user.pw_hash);
     if (!ok) return res.json({ ok: false, msg: "이메일/비번 불일치" });
 
-    const token = makeToken(user);
-    res.json({ ok: true, email: user.email, name: user.name, token });
+    res.json({
+      ok: true,
+      email: user.email,
+      name: user.name,
+      token: makeToken(user)
+    });
 
   } catch (err) {
     console.error(err);
@@ -163,15 +204,20 @@ app.post("/api/auth/login", async (req, res) => {
 // Gemini 이미지 생성
 // ----------------------------
 app.post("/api/gemini-image", async (req, res) => {
-  const { prompt, count = 4 } = req.body || {};
-  if (!prompt) return res.json({ ok: false, msg: "프롬프트 없음" });
+  const { prompt, count = 4 } = req.body;
+
+  if (!prompt)
+    return res.json({ ok: false, msg: "프롬프트 없음" });
 
   try {
     if (!GEMINI_API_KEY) {
-      const imgs = Array.from({ length: Math.min(count, 4) }).map((_, i) =>
-        `https://picsum.photos/seed/${encodeURIComponent(prompt + "-" + i)}/800/1200`
-      );
-      return res.json({ ok: true, images: imgs, demo: true });
+      return res.json({
+        ok: true,
+        demo: true,
+        images: Array.from({ length: count }).map((_, i) =>
+          `https://picsum.photos/seed/${prompt}-${i}/800/1200`
+        )
+      });
     }
 
     const r = await fetch(
@@ -187,12 +233,12 @@ app.post("/api/gemini-image", async (req, res) => {
     );
 
     const data = await r.json();
-    const images =
+    const imgs =
       data?.candidates?.[0]?.content?.parts
         ?.filter(p => p.inlineData)
         ?.map(p => `data:image/png;base64,${p.inlineData.data}`) || [];
 
-    res.json({ ok: true, images });
+    res.json({ ok: true, images: imgs });
 
   } catch (err) {
     console.error(err);
@@ -201,7 +247,7 @@ app.post("/api/gemini-image", async (req, res) => {
 });
 
 // ----------------------------
-// VIDEO MOCK API
+// Video Mock
 // ----------------------------
 app.post("/api/video-from-images", (req, res) => {
   res.json({
@@ -211,21 +257,16 @@ app.post("/api/video-from-images", (req, res) => {
 });
 
 // ----------------------------
-// 정적 파일 제공
+// 정적 파일 (SPA)
 // ----------------------------
 app.use(express.static(path.join(__dirname, "public")));
 
-// ----------------------------
-// SPA Routing (Express 5 safe version)
-// ----------------------------
-const spaRouter = express.Router();
-spaRouter.use((req, res) => {
+app.get("*", (req, res) => {
   res.sendFile(path.join(__dirname, "public/index.html"));
 });
-app.use(spaRouter);
 
 // ----------------------------
-// 서버 시작
+// Start Server
 // ----------------------------
 app.listen(PORT, () => {
   console.log(`🚀 MODEMODE1.AI SERVER RUNNING http://localhost:${PORT}`);
