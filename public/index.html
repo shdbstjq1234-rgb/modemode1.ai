@@ -1,95 +1,119 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ko">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>modemode.ai</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MODEMODE1.AI — AI 모델 스튜디오</title>
 
 <style>
   body {
-    margin: 0;
-    font-family: sans-serif;
-    background: #fafafa;
+    margin:0; padding:0;
+    font-family: -apple-system, blinkmacsystemfont, "Segoe UI", Roboto, Helvetica, Arial;
+    background:#f5f5f5;
+    color:#111;
   }
-  header {
-    padding: 14px 20px;
-    background: #222;
-    color: white;
-    display: flex;
-    justify-content: space-between;
+  header{
+    background:#111; color:#fff; padding:16px;
+    display:flex; justify-content:space-between; align-items:center;
   }
-  .btn {padding:8px 14px; background:#222; color:white; border-radius:6px; cursor:pointer;}
-  .soft {background:#444;}
-  .container {padding:20px; max-width:800px; margin:auto;}
-  #previewBox {
-    width:100%;
-    height:400px;
-    background:#ddd;
-    border-radius:12px;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    overflow:hidden;
+  .container{ padding:20px; max-width:900px; margin:0 auto; }
+  h1{ margin:0 0 20px; font-size:26px; font-weight:700; }
+  .btn{
+    background:#111; color:#fff; border:none;
+    padding:10px 16px; border-radius:6px; cursor:pointer;
   }
-  .hidden {display:none;}
-  .toast {
-    position:fixed;
-    bottom:20px;
-    left:50%;
-    transform:translateX(-50%);
-    background:#000a;
-    padding:10px 16px;
-    color:white;
-    border-radius:8px;
-    opacity:0;
-    transition:all .3s;
+  .btn.soft{
+    background:#ddd; color:#111;
   }
-  .toast.show {opacity:1;}
+  .box{
+    background:#fff; border-radius:10px; padding:20px;
+    box-shadow:0 4px 10px rgba(0,0,0,0.06);
+    margin-bottom:20px;
+  }
+  textarea,input{
+    width:100%; padding:12px; border-radius:8px;
+    border:1px solid #ccc; margin-top:10px;
+    font-size:15px;
+  }
+  img, video{ border-radius:12px; }
+  #previewBox{
+    width:100%; min-height:280px;
+    background:#fafafa; border:1px solid #eee;
+    border-radius:12px; display:flex; justify-content:center;
+    align-items:center; overflow:hidden;
+    color:#888; font-size:14px;
+  }
+  #toast{
+    position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
+    background:#111; color:#fff; padding:12px 22px; border-radius:10px;
+    opacity:0; pointer-events:none; transition:opacity .4s;
+    z-index:9999; font-size:14px;
+  }
 </style>
 </head>
 
 <body>
 
 <header>
-  <div>modemode.ai</div>
-  <div>
-    <button class="btn" onclick="openLogin()">로그인</button>
-    <button class="btn soft" onclick="openSignup()">회원가입</button>
-  </div>
+  <div style="font-size:20px; font-weight:700;">MODEMODE1.AI</div>
+  <button class="btn" onclick="openSignup()">회원가입 / 로그인</button>
 </header>
 
 <div class="container">
-  <h2>AI 모델 이미지 생성</h2>
 
-  <div id="previewBox">프리뷰 영역</div>
+  <!-- PROMPT BUILDER -->
+  <div class="box">
+    <h1>AI 모델 스튜디오</h1>
 
-  <h3>현재 프롬프트</h3>
-  <pre id="promptOutput">"여기에 생성된 프롬프트 표시"</pre>
+    <label>프롬프트 입력</label>
+    <textarea id="promptInput" rows="3" placeholder="예: '흰 배경에서 포즈 취하는 남성 모델, 패션 룩북 스타일'"></textarea>
 
-  <button id="btnGenerateImage" class="btn">AI 이미지 생성</button>
-  <button id="btnGenerateVideo" class="btn soft">이미지 → 영상 생성</button>
+    <button id="genImageBtn" class="btn" style="margin-top:12px;">AI 이미지 생성</button>
+    <button id="genVideoBtn" class="btn soft" style="margin-top:12px;">이미지 → 영상 생성</button>
+  </div>
+
+  <!-- PREVIEW -->
+  <div class="box">
+    <h3>🔥 프리뷰</h3>
+    <div id="previewBox">여기에 이미지 / 영상이 표시됩니다</div>
+  </div>
+
 </div>
 
-<!-- 로그인 모달 -->
-<div id="loginModal" class="hidden">
-  <h3>로그인</h3>
-  <input id="loginEmail" placeholder="이메일"/><br/><br/>
-  <input id="loginPw" type="password" placeholder="비밀번호"/><br/><br/>
-  <button onclick="doLogin()" class="btn">로그인</button>
+<!-- TOAST -->
+<div id="toast"></div>
+
+<!-- SIGNUP MODAL -->
+<div id="signupModal" style="
+  position:fixed; inset:0; background:rgba(0,0,0,0.55);
+  display:none; justify-content:center; align-items:center;">
+  <div style="background:#fff; padding:30px; width:360px; border-radius:12px;">
+    <h2>회원가입</h2>
+
+    <input id="sg_name" placeholder="이름" />
+    <input id="sg_email" placeholder="이메일" />
+    <input id="sg_pw" type="password" placeholder="비밀번호" />
+
+    <button class="btn" style="margin-top:15px;" onclick="doSignup()">가입하기</button>
+    <button class="btn soft" style="margin-top:8px;" onclick="closeSignup()">닫기</button>
+  </div>
 </div>
 
-<!-- 회원가입 모달 -->
-<div id="signupModal" class="hidden">
-  <h3>회원가입</h3>
-  <input id="sName" placeholder="이름"/><br/><br/>
-  <input id="sEmail" placeholder="이메일"/><br/><br/>
-  <input id="sPw" type="password" placeholder="비밀번호"/><br/><br/>
-  <button onclick="doSignup()" class="btn">가입하기</button>
-</div>
+<!-- LOGIN MODAL -->
+<div id="loginModal" style="
+  position:fixed; inset:0; background:rgba(0,0,0,0.55);
+  display:none; justify-content:center; align-items:center;">
+  <div style="background:#fff; padding:30px; width:360px; border-radius:12px;">
+    <h2>로그인</h2>
 
-<div id="toast" class="toast"></div>
+    <input id="lg_email" placeholder="이메일" />
+    <input id="lg_pw" type="password" placeholder="비밀번호" />
+
+    <button class="btn" style="margin-top:15px;" onclick="doLogin()">로그인</button>
+    <button class="btn soft" style="margin-top:8px;" onclick="closeLogin()">닫기</button>
+  </div>
+</div>
 
 <script src="/app.js"></script>
-
 </body>
 </html>
