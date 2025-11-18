@@ -17,13 +17,13 @@ import { Low } from "lowdb";
 import { JSONFile } from "lowdb/node";
 
 // ----------------------------
-// 경로
+// 경로 설정
 // ----------------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ----------------------------
-// 환경변수
+// 환경변수 설정
 // ----------------------------
 try { (await import("dotenv")).config(); } catch {}
 const PORT = process.env.PORT || 3000;
@@ -32,10 +32,11 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const CORS_ALLOW = process.env.CORS_ORIGIN || "*";
 
 // ----------------------------
-// EXPRESS APP
+// Express App 설정
 // ----------------------------
 const app = express();
 
+// CSP 해제 (Render에서 버튼, JS 실행 막힘 방지)
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use((req, res, next) => {
   res.setHeader(
@@ -48,21 +49,29 @@ app.use((req, res, next) => {
 app.use(cors({ origin: CORS_ALLOW, credentials: true }));
 app.use(express.json({ limit: "10mb" }));
 app.set("trust proxy", 1);
+
 app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
 
 // ----------------------------
 // JSON DB (lowdb)
 // ----------------------------
 const dbFile = path.join(__dirname, "data.json");
-if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, JSON.stringify({ users: [] }));
+
+// 파일이 없으면 생성
+if (!fs.existsSync(dbFile)) {
+  fs.writeFileSync(dbFile, JSON.stringify({ users: [] }, null, 2));
+}
 
 const adapter = new JSONFile(dbFile);
 const db = new Low(adapter);
+
+// 데이터 로드 / 초기화
 await db.read();
 db.data ||= { users: [] };
+await db.write();
 
 // ----------------------------
-// 파일 업로드 폴더
+// 파일 업로드 (uploads 폴더)
 // ----------------------------
 const UP_DIR = path.join(__dirname, "uploads");
 if (!fs.existsSync(UP_DIR)) fs.mkdirSync(UP_DIR);
@@ -70,26 +79,28 @@ if (!fs.existsSync(UP_DIR)) fs.mkdirSync(UP_DIR);
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UP_DIR),
-    filename: (_req, file, cb) =>
-      cb(null, Date.now() + "_" + file.originalname.replace(/[^\w.-]/g, "_"))
+    filename: (_req, file, cb) => {
+      const safeName = Date.now() + "_" + file.originalname.replace(/[^\w.-]/g, "_");
+      cb(null, safeName);
+    }
   }),
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 app.use("/uploads", express.static(UP_DIR));
 
 // ----------------------------
-// JWT
+// JWT 토큰 생성
 // ----------------------------
-function makeToken(u) {
+function makeToken(user) {
   return jwt.sign(
-    { uid: u.id, email: u.email, name: u.name },
+    { uid: user.id, name: user.name, email: user.email },
     JWT_SECRET,
     { expiresIn: "7d" }
   );
 }
 
 // ----------------------------
-// AUTH — SIGNUP
+// 회원가입
 // ----------------------------
 app.post("/api/auth/signup", async (req, res) => {
   try {
@@ -121,14 +132,14 @@ app.post("/api/auth/signup", async (req, res) => {
       token: makeToken(newUser)
     });
 
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     return res.json({ ok: false, msg: "회원가입 실패" });
   }
 });
 
 // ----------------------------
-// AUTH — LOGIN
+// 로그인
 // ----------------------------
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -145,32 +156,34 @@ app.post("/api/auth/login", async (req, res) => {
 
     return res.json({
       ok: true,
-      email: user.email,
       name: user.name,
+      email: user.email,
       token: makeToken(user)
     });
 
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     return res.json({ ok: false, msg: "로그인 실패" });
   }
 });
 
 // ----------------------------
-// AI 이미지 생성
+// Gemini 이미지 생성
 // ----------------------------
 app.post("/api/gemini-image", async (req, res) => {
   const { prompt, count = 4 } = req.body || {};
   if (!prompt) return res.json({ ok: false, msg: "프롬프트 없음" });
 
   try {
+    // 데모 모드 (키 없을 때)
     if (!GEMINI_API_KEY) {
-      const imgs = Array.from({ length: Math.min(count, 4) }).map((_, i) =>
-        `https://picsum.photos/seed/${prompt}-${i}/800/1200`
+      const demoImages = Array.from({ length: Math.min(count, 4) }).map((_, i) =>
+        `https://picsum.photos/seed/${encodeURIComponent(prompt + "-" + i)}/800/1200`
       );
-      return res.json({ ok: true, images: imgs, demo: true });
+      return res.json({ ok: true, images: demoImages, demo: true });
     }
 
+    // 실제 생성
     const r = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`,
       {
@@ -189,19 +202,19 @@ app.post("/api/gemini-image", async (req, res) => {
         ?.filter(p => p.inlineData)
         ?.map(p => `data:image/png;base64,${p.inlineData.data}`) || [];
 
-    res.json({ ok: true, images });
+    return res.json({ ok: true, images });
 
-  } catch (err) {
-    console.error(err);
+  } catch (e) {
+    console.error(e);
     return res.json({ ok: false, msg: "Gemini 오류" });
   }
 });
 
 // ----------------------------
-// VIDEO MOCK
+// 비디오 생성 MOCK
 // ----------------------------
 app.post("/api/video-from-images", (req, res) => {
-  res.json({
+  return res.json({
     ok: true,
     videoUrl:
       "https://sample-videos.com/video321/mp4/720/big_buck_bunny_720p_1mb.mp4"
@@ -209,7 +222,7 @@ app.post("/api/video-from-images", (req, res) => {
 });
 
 // ----------------------------
-// 정적 파일
+// 정적 웹 (public 폴더)
 // ----------------------------
 app.use(express.static(path.join(__dirname, "public")));
 
