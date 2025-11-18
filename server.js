@@ -1,6 +1,6 @@
 // ========================================
-//   MODEMODE1.AI — FINAL SERVER (NO SQLITE)
-//   JSON DB (lowdb) 기반 — Render 완전 호환
+//   MODEMODE1.AI — RENDER SAFE VERSION
+//   lowdb 빈 파일 / undefined 오류 100% 방지
 // ========================================
 
 import express from "express";
@@ -23,7 +23,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // -------------------------
-// 환경변수
+// 환경 변수
 // -------------------------
 try { (await import("dotenv")).config(); } catch {}
 const PORT = process.env.PORT || 3000;
@@ -31,37 +31,48 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 // -------------------------
-// EXPRESS
-// -------------------------
-const app = express();
-
-app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(
-  cors({
-    origin: "*",
-    credentials: true
-  })
-);
-
-app.use(express.json({ limit: "12mb" }));
-app.set("trust proxy", 1);
-
-// -------------------------
-// Rate Limit (API 보호)
-// -------------------------
-app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
-
-// -------------------------
 // JSON DB (lowdb)
 // -------------------------
 const dbFile = path.join(__dirname, "data.json");
-if (!fs.existsSync(dbFile)) fs.writeFileSync(dbFile, JSON.stringify({ users: [] }));
+
+// 1) 파일이 존재하지 않으면 생성
+if (!fs.existsSync(dbFile)) {
+  fs.writeFileSync(dbFile, JSON.stringify({ users: [] }, null, 2));
+}
+
+// 2) 파일이 비어있으면 다시 기본값으로 채움 (Render-safe)
+if (fs.readFileSync(dbFile).toString().trim().length === 0) {
+  fs.writeFileSync(dbFile, JSON.stringify({ users: [] }, null, 2));
+}
 
 const adapter = new JSONFile(dbFile);
 const db = new Low(adapter);
 
-await db.read();
-db.data ||= { users: [] };
+// 3) try-catch로 감싸서 JSON 파싱 실패해도 자동 복구
+try {
+  await db.read();
+} catch (e) {
+  console.error("❗ lowdb JSON 파싱 실패 → 기본값으로 복구");
+  db.data = { users: [] };
+  await db.write();
+}
+
+// 4) data가 없으면 기본값 세팅
+if (!db.data || typeof db.data !== "object") {
+  db.data = { users: [] };
+  await db.write();
+}
+
+// -------------------------
+// Express
+// -------------------------
+const app = express();
+
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(cors({ origin: "*", credentials: true }));
+app.use(express.json({ limit: "10mb" }));
+app.set("trust proxy", 1);
+app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
 
 // -------------------------
 // 파일 업로드
@@ -113,10 +124,10 @@ app.post("/api/auth/signup", async (req, res) => {
     db.data.users.push(user);
     await db.write();
 
-    res.json({ ok: true, token: makeToken(user), name, email });
+    res.json({ ok: true, token: makeToken(user) });
   } catch (e) {
     console.error(e);
-    res.json({ ok: false });
+    res.json({ ok: false, msg: "회원가입 실패" });
   }
 });
 
@@ -132,36 +143,30 @@ app.post("/api/auth/login", async (req, res) => {
   const ok = await bcrypt.compare(password, user.pw_hash);
   if (!ok) return res.json({ ok: false, msg: "이메일/비번 불일치" });
 
-  res.json({
-    ok: true,
-    name: user.name,
-    email: user.email,
-    token: makeToken(user)
-  });
+  res.json({ ok: true, token: makeToken(user), name: user.name });
 });
 
 // -------------------------
-// AI 이미지 생성
+// Gemini 이미지 생성
 // -------------------------
 app.post("/api/gemini-image", async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt) return res.json({ ok: false });
+
+  if (!GEMINI_API_KEY) {
+    return res.json({
+      ok: true,
+      demo: true,
+      images: [
+        `https://picsum.photos/seed/${prompt}1/800/1200`,
+        `https://picsum.photos/seed/${prompt}2/800/1200`,
+        `https://picsum.photos/seed/${prompt}3/800/1200`,
+        `https://picsum.photos/seed/${prompt}4/800/1200`
+      ]
+    });
+  }
+
   try {
-    const { prompt } = req.body;
-
-    if (!prompt) return res.json({ ok: false, msg: "프롬프트 없음" });
-
-    if (!GEMINI_API_KEY) {
-      return res.json({
-        ok: true,
-        demo: true,
-        images: [
-          `https://picsum.photos/seed/${encodeURIComponent(prompt)}1/800/1200`,
-          `https://picsum.photos/seed/${encodeURIComponent(prompt)}2/800/1200`,
-          `https://picsum.photos/seed/${encodeURIComponent(prompt)}3/800/1200`,
-          `https://picsum.photos/seed/${encodeURIComponent(prompt)}4/800/1200`
-        ]
-      });
-    }
-
     const r = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`,
       {
@@ -175,6 +180,7 @@ app.post("/api/gemini-image", async (req, res) => {
     );
 
     const data = await r.json();
+
     const imgs =
       data?.candidates?.[0]?.content?.parts
         ?.filter(p => p.inlineData)
@@ -188,7 +194,7 @@ app.post("/api/gemini-image", async (req, res) => {
 });
 
 // -------------------------
-// 영상 생성 MOCK
+// 영상 생성 Mock
 // -------------------------
 app.post("/api/video-from-images", (req, res) => {
   res.json({
@@ -199,17 +205,15 @@ app.post("/api/video-from-images", (req, res) => {
 });
 
 // -------------------------
-// 정적 파일 — ★ path-to-regexp 오류 해결
+// 정적 파일 (오류 없는 버전)
 // -------------------------
-app.use(express.static(path.join(__dirname, "public"), { extensions: ["html"] }));
+app.use(express.static(path.join(__dirname, "public")));
 
-app.get("*", (req, res) => {
+app.get("/*", (req, res) => {
   res.sendFile(path.join(__dirname, "public/index.html"));
 });
 
 // -------------------------
-// 서버 시작
-// -------------------------
 app.listen(PORT, () => {
-  console.log("🚀 MODEMODE1.AI SERVER RUNNING ON PORT " + PORT);
+  console.log("🚀 SERVER ON PORT", PORT);
 });
