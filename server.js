@@ -1,5 +1,5 @@
 // ========================================
-// MODEMODE1.AI — FINAL SERVER (sql.js + local wasm)
+//   MODEMODE1.AI — FINAL SERVER (sqlite3 + Express5)
 // ========================================
 
 import express from "express";
@@ -12,7 +12,8 @@ import fs from "fs";
 import multer from "multer";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
-import initSqlJs from "sql.js";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
 
 // ----------------------------
 // 경로
@@ -21,7 +22,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ----------------------------
-// ENV
+// 환경변수
 // ----------------------------
 try { (await import("dotenv")).config(); } catch {}
 const PORT = process.env.PORT || 3000;
@@ -30,7 +31,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const CORS_ALLOW = process.env.CORS_ORIGIN || "*";
 
 // ----------------------------
-// Express
+// EXPRESS APP
 // ----------------------------
 const app = express();
 
@@ -50,48 +51,29 @@ app.set("trust proxy", 1);
 app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
 
 // ----------------------------
-// SQL.js + local wasm
+// SQLite3 DB 연결
 // ----------------------------
-console.log("⏳ Loading SQL.js with local wasm...");
+sqlite3.verbose();
 
-const SQL = await initSqlJs({
-  locateFile: (file) => path.join(__dirname, "sqljs", file)
+const dbDir = path.join(__dirname, "data");
+const dbPath = path.join(dbDir, "app.db");
+
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir);
+
+const db = await open({
+  filename: dbPath,
+  driver: sqlite3.Database
 });
 
-console.log("✅ SQL.js Loaded!");
-
-// ----------------------------
-// DB 준비
-// ----------------------------
-const DB_DIR = path.join(__dirname, "data");
-const DB_PATH = path.join(DB_DIR, "app.db");
-
-if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR);
-
-let db;
-
-// 기존 DB 로드
-if (fs.existsSync(DB_PATH)) {
-  const fileBuf = fs.readFileSync(DB_PATH);
-  db = new SQL.Database(fileBuf);
-} else {
-  db = new SQL.Database();
-  db.run(`
-    CREATE TABLE users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      email TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      pw_hash TEXT NOT NULL,
-      created_at TEXT DEFAULT (datetime('now'))
-    );
-  `);
-  saveDB();
-}
-
-function saveDB() {
-  const data = Buffer.from(db.export());
-  fs.writeFileSync(DB_PATH, data);
-}
+await db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT UNIQUE NOT NULL,
+  name TEXT NOT NULL,
+  pw_hash TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+`);
 
 // ----------------------------
 // 파일 업로드
@@ -101,13 +83,12 @@ if (!fs.existsSync(UP_DIR)) fs.mkdirSync(UP_DIR);
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UP_DIR),
-    filename: (_req, file, cb) =>
+    destination: (_, __, cb) => cb(null, UP_DIR),
+    filename: (_, file, cb) =>
       cb(null, Date.now() + "_" + file.originalname.replace(/[^\w.-]/g, "_"))
   }),
   limits: { fileSize: 10 * 1024 * 1024 }
 });
-
 app.use("/uploads", express.static(UP_DIR));
 
 // ----------------------------
@@ -122,37 +103,33 @@ function makeToken(user) {
 }
 
 // ----------------------------
-// AUTH Signup
+// AUTH API
 // ----------------------------
 app.post("/api/auth/signup", async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-
+    const { name, email, password } = req.body || {};
     if (!name || !email || !password)
       return res.json({ ok: false, msg: "필수값 없음" });
 
-    const check = db.exec(
-      "SELECT id FROM users WHERE email=$email",
-      { $email: email }
-    );
-    if (check.length > 0)
-      return res.json({ ok: false, msg: "이미 가입된 이메일" });
+    const exists = await db.get("SELECT id FROM users WHERE email=?", email);
+    if (exists) return res.json({ ok: false, msg: "이미 가입된 이메일" });
 
     const pw_hash = await bcrypt.hash(password, 10);
 
-    db.run(
-      "INSERT INTO users (email, name, pw_hash) VALUES ($e,$n,$p)",
-      { $e: email, $n: name, $p: pw_hash }
-    );
-
-    saveDB();
-
-    return res.json({
-      ok: true,
+    const result = await db.run(
+      "INSERT INTO users (email, name, pw_hash) VALUES (?, ?, ?)",
       email,
       name,
-      token: makeToken({ id: Date.now(), email, name })
+      pw_hash
+    );
+
+    const token = makeToken({
+      id: result.lastID,
+      email,
+      name
     });
+
+    res.json({ ok: true, email, name, token });
 
   } catch (err) {
     console.error(err);
@@ -160,39 +137,20 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 });
 
-// ----------------------------
-// AUTH Login
-// ----------------------------
 app.post("/api/auth/login", async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
+    if (!email || !password)
+      return res.json({ ok: false, msg: "필수값 없음" });
 
-    const result = db.exec(
-      "SELECT * FROM users WHERE email=$email LIMIT 1",
-      { $email: email }
-    );
-
-    if (result.length === 0)
-      return res.json({ ok: false, msg: "이메일/비번 불일치" });
-
-    const row = result[0].values[0];
-
-    const user = {
-      id: row[0],
-      email: row[1],
-      name: row[2],
-      pw_hash: row[3]
-    };
+    const user = await db.get("SELECT * FROM users WHERE email=?", email);
+    if (!user) return res.json({ ok: false, msg: "이메일/비번 불일치" });
 
     const ok = await bcrypt.compare(password, user.pw_hash);
     if (!ok) return res.json({ ok: false, msg: "이메일/비번 불일치" });
 
-    res.json({
-      ok: true,
-      email: user.email,
-      name: user.name,
-      token: makeToken(user)
-    });
+    const token = makeToken(user);
+    res.json({ ok: true, email: user.email, name: user.name, token });
 
   } catch (err) {
     console.error(err);
@@ -201,23 +159,18 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // ----------------------------
-// Gemini 이미지 생성
+// AI 이미지 생성
 // ----------------------------
 app.post("/api/gemini-image", async (req, res) => {
-  const { prompt, count = 4 } = req.body;
-
-  if (!prompt)
-    return res.json({ ok: false, msg: "프롬프트 없음" });
+  const { prompt, count = 4 } = req.body || {};
+  if (!prompt) return res.json({ ok: false, msg: "프롬프트 없음" });
 
   try {
     if (!GEMINI_API_KEY) {
-      return res.json({
-        ok: true,
-        demo: true,
-        images: Array.from({ length: count }).map((_, i) =>
-          `https://picsum.photos/seed/${prompt}-${i}/800/1200`
-        )
-      });
+      const imgs = Array.from({ length: Math.min(count, 4) }).map((_, i) =>
+        `https://picsum.photos/seed/${encodeURIComponent(prompt + "-" + i)}/800/1200`
+      );
+      return res.json({ ok: true, images: imgs, demo: true });
     }
 
     const r = await fetch(
@@ -233,12 +186,12 @@ app.post("/api/gemini-image", async (req, res) => {
     );
 
     const data = await r.json();
-    const imgs =
+    const images =
       data?.candidates?.[0]?.content?.parts
         ?.filter(p => p.inlineData)
         ?.map(p => `data:image/png;base64,${p.inlineData.data}`) || [];
 
-    res.json({ ok: true, images: imgs });
+    res.json({ ok: true, images });
 
   } catch (err) {
     console.error(err);
@@ -247,7 +200,7 @@ app.post("/api/gemini-image", async (req, res) => {
 });
 
 // ----------------------------
-// Video Mock
+// VIDEO MOCK API
 // ----------------------------
 app.post("/api/video-from-images", (req, res) => {
   res.json({
@@ -257,16 +210,20 @@ app.post("/api/video-from-images", (req, res) => {
 });
 
 // ----------------------------
-// 정적 파일 (SPA)
+// 정적 파일 제공
 // ----------------------------
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("*", (req, res) => {
+// ----------------------------
+// Express 5 — SPA Fallback FIX
+// ----------------------------
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) return next();
   res.sendFile(path.join(__dirname, "public/index.html"));
 });
 
 // ----------------------------
-// Start Server
+// 서버 시작
 // ----------------------------
 app.listen(PORT, () => {
   console.log(`🚀 MODEMODE1.AI SERVER RUNNING http://localhost:${PORT}`);
