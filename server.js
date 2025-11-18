@@ -25,6 +25,7 @@ const __dirname = path.dirname(__filename);
 // 환경변수
 // ----------------------------
 try { (await import("dotenv")).config(); } catch {}
+
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -56,7 +57,6 @@ app.use("/api/", rateLimit({ windowMs: 60000, max: 120 }));
 sqlite3.verbose();
 
 const dbPath = path.join(__dirname, "data", "app.db");
-
 if (!fs.existsSync(path.join(__dirname, "data"))) {
   fs.mkdirSync(path.join(__dirname, "data"));
 }
@@ -138,7 +138,6 @@ app.post("/api/auth/signup", async (req, res) => {
   }
 });
 
-
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body || {};
@@ -161,7 +160,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 // ----------------------------
-// AI 이미지 생성
+// Gemini 이미지 생성
 // ----------------------------
 app.post("/api/gemini-image", async (req, res) => {
   const { prompt, count = 4 } = req.body || {};
@@ -216,9 +215,14 @@ app.post("/api/video-from-images", (req, res) => {
 // ----------------------------
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("*", (req, res) => {
+// ----------------------------
+// SPA Routing (Express 5 safe version)
+// ----------------------------
+const spaRouter = express.Router();
+spaRouter.use((req, res) => {
   res.sendFile(path.join(__dirname, "public/index.html"));
 });
+app.use(spaRouter);
 
 // ----------------------------
 // 서버 시작
